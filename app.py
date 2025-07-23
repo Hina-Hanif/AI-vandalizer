@@ -1,10 +1,27 @@
 from flask import Flask, render_template, request, jsonify
+from flask_cors import CORS
 import os
-from groq import Groq
+from dotenv import load_dotenv
+import requests
+import logging
 import random
 import re
 
+# Load environment variables from .env file
+load_dotenv()
+
 app = Flask(__name__)
+
+# Enable CORS for all routes
+CORS(app)
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Groq API configuration
+GROQ_API_KEY = os.getenv('GROQ_API_KEY')
+GROQ_API_URL = "https://api.groq.com/openai/v1/chat/completions"
 
 # List of supported Groq models (in order of preference)
 SUPPORTED_MODELS = [
@@ -16,10 +33,13 @@ SUPPORTED_MODELS = [
     "gemma-7b-it"
 ]
 
-# Initialize Groq client
-GROQ_API_KEY = "Your_Groq_API_Key_Here"  # Replace with your actual Groq API key
-client = Groq(api_key=GROQ_API_KEY)
 MODEL_NAME = "llama3-70b-8192"
+
+# Check if API key is loaded
+if not GROQ_API_KEY:
+    logger.error("GROQ_API_KEY not found in environment variables")
+    raise ValueError("GROQ_API_KEY must be set in .env file or environment variables")
+
 # Vandalization prompts for different personality modes
 PERSONALITY_PROMPTS = {
     'burnt-out-artist': """
@@ -98,16 +118,76 @@ Transform this text according to your personality, but keep it as vandalized/ann
     
     return full_prompt
 
+def call_groq_api(prompt, model=MODEL_NAME, temperature=0.7, max_tokens=2000):
+    """Make a direct HTTP request to Groq API"""
+    try:
+        headers = {
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": 1,
+            "stream": False
+        }
+        
+        logger.info(f"Making request to Groq API with model: {model}")
+        response = requests.post(
+            GROQ_API_URL,
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        
+        if response.status_code != 200:
+            logger.error(f"Groq API error: {response.status_code} - {response.text}")
+            raise Exception(f"Groq API error: {response.status_code} - {response.text}")
+        
+        groq_response = response.json()
+        
+        if 'choices' in groq_response and len(groq_response['choices']) > 0:
+            return groq_response['choices'][0]['message']['content']
+        else:
+            raise Exception("Invalid response structure from Groq API")
+            
+    except requests.exceptions.Timeout:
+        raise Exception("Request to Groq API timed out")
+    except requests.exceptions.ConnectionError:
+        raise Exception("Connection error to Groq API")
+    except Exception as e:
+        raise Exception(str(e))
+
 @app.route('/')
 def index():
     """Serve the main page."""
     return render_template('index.html')
 
+@app.route('/api/health', methods=['GET'])
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "status": "healthy",
+        "message": "Emotion Vandalizer is running!",
+        "model": MODEL_NAME
+    })
+
 @app.route('/api/vandalize', methods=['POST'])
 def vandalize_text():
-    """API endpoint to vandalize text using Groq AI."""
+    """API endpoint to vandalize text using Groq API."""
     try:
         data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
         
         original_text = data.get('text', '').strip()
         personality = data.get('personality', 'melodramatic-teen')
@@ -117,66 +197,65 @@ def vandalize_text():
         if not original_text:
             return jsonify({'error': 'No text provided'}), 400
         
+        logger.info(f"Vandalizing text with personality: {personality}, chaos: {chaos_level}")
+        
         # Create the vandalization prompt
         prompt = create_vandalization_prompt(original_text, personality, chaos_level)
         
-        # Try multiple models in case of deprecation
-        MODEL_NAME = "llama3-70b-8192"
+        # Try primary model first
+        vandalized_text = None
+        current_model = MODEL_NAME
+        temperature = min(0.9, chaos_level / 100.0 + 0.3)
         
         try:
-            # Call Groq API with a supported model
-            chat_completion = client.chat.completions.create(
-                messages=[
-                    {
-                        "role": "user",
-                        "content": prompt
-                    }
-                ],
-                model=MODEL_NAME,
-                temperature=min(0.9, chaos_level / 100.0 + 0.3),  # Higher chaos = more creative
-                max_tokens=2000,
+            vandalized_text = call_groq_api(
+                prompt, 
+                model=current_model, 
+                temperature=temperature,
+                max_tokens=2000
             )
+            logger.info(f"Success with model: {current_model}")
+            
         except Exception as model_error:
-            # If the primary model fails, try the backup models
-            print(f"Model {model_to_use} failed: {model_error}")
-            for backup_model in SUPPORTED_MODELS[1:]:
+            logger.error(f"Model {current_model} failed: {model_error}")
+            
+            # Try backup models
+            for backup_model in SUPPORTED_MODELS:
+                if backup_model == current_model:
+                    continue
                 try:
-                    print(f"Trying backup model: {backup_model}")
-                    chat_completion = client.chat.completions.create(
-                        messages=[
-                            {
-                                "role": "user",
-                                "content": prompt
-                            }
-                        ],
+                    logger.info(f"Trying backup model: {backup_model}")
+                    vandalized_text = call_groq_api(
+                        prompt,
                         model=backup_model,
-                        temperature=min(0.9, chaos_level / 100.0 + 0.3),
-                        max_tokens=2000,
+                        temperature=temperature,
+                        max_tokens=2000
                     )
-                    print(f"Success with model: {backup_model}")
+                    logger.info(f"Success with backup model: {backup_model}")
+                    current_model = backup_model
                     break
                 except Exception as backup_error:
-                    print(f"Backup model {backup_model} also failed: {backup_error}")
+                    logger.error(f"Backup model {backup_model} also failed: {backup_error}")
                     continue
-            else:
-                # If all models fail, raise the original error
-                raise model_error
-        
-        vandalized_text = chat_completion.choices[0].message.content
+            
+            if not vandalized_text:
+                raise Exception("All models failed to generate response")
         
         # Post-process to add additional chaos elements if needed
         if chaos_level > 70:
             vandalized_text = add_extra_chaos(vandalized_text, personality, enable_doodles)
         
         return jsonify({
+            'success': True,
             'vandalized_text': vandalized_text,
             'original_text': original_text,
             'personality': personality,
-            'chaos_level': chaos_level
+            'chaos_level': chaos_level,
+            'model_used': current_model
         })
         
     except Exception as e:
-        print(f"Error in vandalize_text: {str(e)}")
+        logger.error(f"Error in vandalize_text: {str(e)}")
         return jsonify({'error': f'Failed to vandalize text: {str(e)}'}), 500
 
 def add_extra_chaos(text, personality, enable_doodles):
@@ -220,7 +299,14 @@ def detect_ai_tone():
     """API endpoint to detect if text sounds AI-generated."""
     try:
         data = request.get_json()
+        
+        if not data:
+            return jsonify({'error': 'No JSON data provided'}), 400
+            
         text = data.get('text', '').strip()
+        
+        if not text:
+            return jsonify({'error': 'No text provided'}), 400
         
         # Simple heuristic for AI detection
         ai_keywords = ['optimal', 'leverage', 'synergy', 'robust', 'seamless', 
@@ -231,9 +317,11 @@ def detect_ai_tone():
         text_lower = text.lower()
         
         # Check for AI keywords
+        detected_keywords = []
         for keyword in ai_keywords:
             if keyword in text_lower:
                 score += 1
+                detected_keywords.append(keyword)
         
         # Check for formal punctuation
         formal_punctuation = text.count(';') + text.count(':')
@@ -250,13 +338,14 @@ def detect_ai_tone():
         is_ai_like = score > 3
         
         return jsonify({
+            'success': True,
             'is_ai_like': is_ai_like,
             'score': score,
-            'detected_keywords': [kw for kw in ai_keywords if kw in text_lower]
+            'detected_keywords': detected_keywords
         })
         
     except Exception as e:
-        print(f"Error in detect_ai_tone: {str(e)}")
+        logger.error(f"Error in detect_ai_tone: {str(e)}")
         return jsonify({'error': str(e)}), 500
 
 @app.route('/api/sample', methods=['GET'])
@@ -287,13 +376,34 @@ A symphony plays on celestial strings,
 As timeless oblivion, softly it sings."""
     }
     
-    return jsonify({'sample': samples.get(sample_type, samples['essay'])})
+    return jsonify({
+        'success': True,
+        'sample': samples.get(sample_type, samples['essay']),
+        'type': sample_type
+    })
+
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404 errors"""
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Handle 500 errors"""
+    return jsonify({"error": "Internal server error"}), 500
 
 if __name__ == '__main__':
+    # Get port from environment variable (Render sets this)
+    port = int(os.getenv('PORT', 5000))
+    debug = os.getenv('DEBUG', 'False').lower() == 'true'
+    
     # Create templates directory if it doesn't exist
     if not os.path.exists('templates'):
         os.makedirs('templates')
     
-    print("Starting Emotion Vandalizer Flask App...")
-    print("Make sure to put the index.html file in the 'templates' folder!")
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    logger.info(f"Starting Emotion Vandalizer Flask App on port {port}")
+    logger.info(f"Debug mode: {debug}")
+    logger.info("Make sure to put the index.html file in the 'templates' folder!")
+    
+    # Use 0.0.0.0 for deployment, disable debug in production
+    app.run(debug=debug, host='0.0.0.0', port=port)
