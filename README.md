@@ -37,8 +37,10 @@ emotion-vandalizer/
 1. Copy the `app.py` code into your main application file
 2. Create a `templates` folder and add the `index.html` file inside it
 3. Make sure your Groq API key is correctly set in the `app.py` file
-4. <img width="496" height="96" alt="image" src="https://github.com/user-attachments/assets/c1f1cada-d56f-4e60-958f-f4a08269ef9c" />
-5. Put your API key after making it from https://console.groq.com
+4. Make a .env file and give this
+<img width="499" height="68" alt="image" src="https://github.com/user-attachments/assets/5aaed92d-75f1-4a7b-9522-3b8333efa995" />
+
+5. Put your API key after making it from https://console.groq.com 
 
 
 ### 4. Run the Application
