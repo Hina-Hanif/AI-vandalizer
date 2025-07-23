@@ -144,3 +144,7 @@ Feel free to add new personalities, improve the vandalization algorithms, or enh
 ## License
 
 This project is for educational and entertainment purposes. Please use responsibly!
+
+## 🚀 Live Demo
+👉 Try it here: [Emotion Vandalizer](https://ai-vandilizer.onrender.com/)
+
